@@ -16,4 +16,7 @@ jobs:
 
       - name: Push to HF
         run: |
-          git push --force https://oauth2:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/psiak/moj-grajek HEAD:main
+          git config --global user.email "psiak@example.com"
+          git config --global user.name "psiak"
+          git remote add hf https://oauth2:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/psiak/moj-grajek || true
+          git push --force hf HEAD:main
