@@ -8,13 +8,13 @@ from flask import Flask
 from threading import Thread
 
 # ==========================================
-# 1. SERWER WWW DLA RENDERA (KEEP ALIVE)
+# SERWER WWW (WYMAGANY PRZEZ RENDER)
 # ==========================================
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot działa, śpiewa i nie śpi!"
+    return "Grajek działa!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -25,27 +25,29 @@ def keep_alive():
     t.start()
 
 # ==========================================
-# 2. KONFIGURACJA BOTA DISCORD
+# KONFIGURACJA BOTA
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True 
 
 bot = commands.Bot(command_prefix="/", intents=intents)
-
 queues = {}
 
-# Konfiguracja yt-dlp obsługująca YT oraz SoundCloud
+# Agresywne opcje wyszukiwania i omijania blokad sieciowych
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
-    'source_address': '0.0.0.0',
+    'default_search': 'ytsearch',
     'nocheckcertificate': True,
+    'ignoreerrors': True,
+    'source_address': '0.0.0.0'
 }
 
+# Wymuszenie stabilnego strumieniowania i ignorowanie pustych pakietów z hostingu
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32 -analyzeduration 0',
     'options': '-vn'
 }
 
@@ -53,25 +55,22 @@ ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 @bot.event
 async def on_ready():
-    print(f'Zalogowano jako: {bot.user.name}')
+    print(f'Bot uruchomiony: {bot.user.name}')
     
-    # Obsługa animowanego awatara z pliku avatar.gif
+    # Awatar
     if os.path.exists("avatar.gif"):
         try:
             with open("avatar.gif", "rb") as f:
-                avatar_bytes = f.read()
-            await bot.user.edit(avatar=avatar_bytes)
-            print("Pomyślnie zaktualizowano animowany awatar bota!")
-        except discord.HTTPException as e:
-            print(f"Discord zablokował zmianę awataru (ratelimit): {e}")
-        except Exception as e:
-            print(f"Nie udało się zmienić awataru: {e}")
+                await bot.user.edit(avatar=f.read())
+            print("Awatar zaktualizowany.")
+        except:
+            pass
             
     try:
-        synced = await bot.tree.sync()
-        print(f"Zsynchronizowano {len(synced)} komend typu Slash.")
+        await bot.tree.sync()
+        print("Komendy zsynchronizowane.")
     except Exception as e:
-        print(f"Błąd synchronizacji komend: {e}")
+        print(f"Błąd sync: {e}")
 
 async def play_next(interaction, guild_id):
     voice_client = interaction.guild.voice_client
@@ -80,85 +79,70 @@ async def play_next(interaction, guild_id):
         try:
             source = discord.FFmpegPCMAudio(next_url, **FFMPEG_OPTIONS)
             voice_client.play(source, after=lambda e: bot.loop.create_task(play_next(interaction, guild_id)))
-            await interaction.channel.send(f"🎶 Teraz gram z kolejki: **{next_title}**")
-        except Exception as e:
-            print(f"Błąd odtwarzania kolejnego utworu: {e}")
-            await interaction.channel.send(f"❌ Błąd podczas odtwarzania kolejnego utworu: {e}")
+            await interaction.channel.send(f"🎶 Gram kolejny utwór: **{next_title}**")
+        except:
+            bot.loop.create_task(play_next(interaction, guild_id))
 
-@bot.tree.command(name="play", description="Puszcza muzykę z YT/linku lub wyszukuje po nazwie")
-@app_commands.describe(utwor="Wklej link (np. z YT) lub wpisz tytuł piosenki")
-async def play(interaction: discord.Interaction, utwor: str):
+@bot.tree.command(name="play", description="Wpisz nazwę piosenki, a bot ją puści")
+@app_commands.describe(piosenka="Wpisz tytuł i wykonawcę")
+async def play(interaction: discord.Interaction, piosenka: str):
+    # Wysłanie natychmiastowej odpowiedzi, żeby Discord nie zerwał połączenia
     await interaction.response.defer()
-    print("KROK 1: Przyjęto komendę /play")
 
     if not interaction.user.voice:
-        await interaction.followup.send("❌ Musisz najpierw wejść na kanał głosowy!")
+        await interaction.followup.send("❌ Wejdź najpierw na kanał głosowy!")
         return
 
     voice_channel = interaction.user.voice.channel
     voice_client = interaction.guild.voice_client
 
-    print("KROK 2: Próba dołączenia na kanał głosowy...")
-    try:
-        if not voice_client:
-            # Timeout na 15 sekund, żeby uniknąć nieskończonego zawieszenia
-            voice_client = await voice_channel.connect(timeout=15.0)
-        elif voice_client.channel != voice_channel:
-            await voice_client.move_to(voice_channel)
-    except Exception as e:
-        print(f"BŁĄD POŁĄCZENIA Z KANAŁEM: {e}")
-        await interaction.followup.send("❌ Serwer napotkał problem z połączeniem głosowym Discorda. Zobacz logi.")
-        return
+    # Wymuszenie połączenia i resetowanie zamrożonych sesji głosowych bota
+    if not voice_client:
+        try:
+            voice_client = await voice_channel.connect(timeout=10.0, reconnect=True)
+        except Exception as e:
+            await interaction.followup.send("❌ Serwer Render blokuje porty głosowe. Zrestartuj bota w panelu Render.")
+            return
+    elif voice_client.channel != voice_channel:
+        await voice_client.move_to(voice_channel)
 
-    print("KROK 3: Połączono z kanałem! Wyszukiwanie utworu...")
     guild_id = interaction.guild_id
     if guild_id not in queues:
         queues[guild_id] = []
 
-    query = utwor
+    # Wyszukiwanie wyłącznie po tekście (szybkie odpytanie)
+    query = f"ytsearch:{piosenka}"
     
-    # Jeśli to NIE jest link, szukamy na SoundCloud (omija bany na IP z YouTube)
-    if not query.startswith("http://") and not query.startswith("https://"):
-        query = f"scsearch:{query}"
-
     loop = asyncio.get_event_loop()
     try:
-        data = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False)),
-            timeout=20.0
-        )
-    except asyncio.TimeoutError:
-        print("BŁĄD: Wyszukiwanie trwało zbyt długo (Timeout).")
-        await interaction.followup.send("❌ Wyszukiwanie trwało zbyt długo i zostało przerwane.")
-        return
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
     except Exception as e:
-        print(f"BŁĄD WYSZUKIWANIA: {e}")
-        await interaction.followup.send(f"❌ Nie udało się pobrać utworu (Błąd: {e}).")
+        await interaction.followup.send("❌ Problem z pobraniem utworu. Spróbuj wpisać inną nazwę.")
         return
 
-    print("KROK 4: Znaleziono utwór. Uruchamianie odtwarzacza...")
-    if 'entries' in data:
-        if not data['entries']:
-            await interaction.followup.send("❌ Nie znaleziono żadnego pasującego utworu.")
-            return
-        data = data['entries'][0]
+    if not data or 'entries' not in data or not data['entries']:
+        await interaction.followup.send("❌ Nie znaleziono piosenki o takiej nazwie.")
+        return
 
-    url = data['url']
-    title = data['title']
+    track = data['entries'][0]
+    if not track:
+        await interaction.followup.send("❌ Błąd przetwarzania utworu.")
+        return
 
-    try:
-        if not voice_client.is_playing() and not voice_client.is_paused():
+    url = track['url']
+    title = track['title']
+
+    # Odtwarzanie dźwięku
+    if not voice_client.is_playing() and not voice_client.is_paused():
+        try:
             source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
             voice_client.play(source, after=lambda e: bot.loop.create_task(play_next(interaction, guild_id)))
-            await interaction.followup.send(f"▶️ Teraz gram: **{title}**")
-            print("KROK 5: Odtwarzanie rozpoczęte pomyślnie!")
-        else:
-            queues[guild_id].append((url, title))
-            await interaction.followup.send(f"📁 Dodano do kolejki: **{title}**")
-            print("KROK 5: Dodano do kolejki pomyślnie!")
-    except Exception as e:
-        print(f"BŁĄD ODTWARZACZA: {e}")
-        await interaction.followup.send(f"❌ Problem z odtwarzaczem audio: {e}")
+            await interaction.followup.send(f"▶️ Muzyka ruszyła! Gram: **{title}**")
+        except Exception as e:
+            await interaction.followup.send("❌ Odtwarzacz serwera się zawiesił. Spróbuj ponownie za chwilę.")
+    else:
+        queues[guild_id].append((url, title))
+        await interaction.followup.send(f"📁 Dodano do kolejki: **{title}**")
 
 if __name__ == "__main__":
     keep_alive()
@@ -166,4 +150,4 @@ if __name__ == "__main__":
     if token:
         bot.run(token)
     else:
-        print("❌ BŁĄD SYSTEMU: Brak zmiennej środowiskowej DISCORD_TOKEN!")
+        print("Brak TOKENU!")
