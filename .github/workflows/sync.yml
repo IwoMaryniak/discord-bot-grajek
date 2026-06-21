@@ -15,9 +15,5 @@ jobs:
           lfs: true
 
       - name: Push to HF
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config --global user.email "psiak@example.com"
-          git config --global user.name "psiak"
-          git push --force https://psiak:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/psiak/moj-grajek HEAD:refs/heads/main
+          git push --force https://oauth2:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/psiak/moj-grajek HEAD:main
